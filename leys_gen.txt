@@ -1,0 +1,7 @@
+# Generate Server's keys
+openssl genrsa -out server_priv.pem 2048
+openssl rsa -in server_priv.pem -pubout -out server_pub.pem
+
+# Generate Client's keys
+openssl genrsa -out client_priv.pem 2048
+openssl rsa -in client_priv.pem -pubout -out client_pub.pem
