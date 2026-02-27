@@ -2,272 +2,234 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <openssl/dh.h>
 #include <openssl/evp.h>
-#include <openssl/sha.h>
+#include <openssl/pem.h>
 #include <openssl/rand.h>
-
-#define PORT 4444
-#define BUF 2048
-#define ROUNDS 30   // Number of send/recv rounds
-
-int read_all(int fd, unsigned char *buf, int len) {
-    int total = 0;
-    while (total < len) {
-        int r = read(fd, buf + total, len - total);
-        if (r <= 0) return -1;
-        total += r;
-    }
-    return total;
-}
-
-int write_all(int fd, unsigned char *buf, int len) {
-    int total = 0;
-    while (total < len) {
-        int r = write(fd, buf + total, len - total);
-        if (r <= 0) return -1;
-        total += r;
-    }
-    return total;
-}
-
-int main() {
-    int s, c;
-    struct sockaddr_in addr;
-    unsigned char buf[BUF];
-
-    s = socket(AF_INET, SOCK_STREAM, 0);
-    int opt = 1;
-    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(PORT);
-    addr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(s, (struct sockaddr*)&addr, sizeof(addr)) < 0) { perror("Bind"); return 1; }
-    listen(s, 1);
-    printf("[+] Server listening...\n");
-
-    c = accept(s, NULL, NULL);
-    printf("[+] Client connected!\n");
-
-    // --- DH key exchange ---
-    DH *dh = DH_get_2048_256();
-    DH_generate_key(dh);
-    const BIGNUM *pub = NULL;
-    DH_get0_key(dh, &pub, NULL);
-    int pub_len = BN_num_bytes(pub);
-    BN_bn2bin(pub, buf);
-    int nlen = htonl(pub_len);
-    write_all(c, (unsigned char*)&nlen, sizeof(nlen));
-    write_all(c, buf, pub_len);
-
-    int clen;
-    read_all(c, (unsigned char*)&clen, sizeof(clen));
-    clen = ntohl(clen);
-    read_all(c, buf, clen);
-    BIGNUM *client_pub = BN_bin2bn(buf, clen, NULL);
-
-    unsigned char secret[256], key[32];
-    int secret_len = DH_compute_key(secret, client_pub, dh);
-    SHA256(secret, secret_len, key);
-
-    DH_free(dh);
-    BN_free(client_pub);
-
-    unsigned char iv[12], tag[16], ciphertext[BUF], plaintext[BUF];
-    int ct_len, outlen, final_len;
-
-    for (int i = 0; i < ROUNDS; i++) {
-        // --- RECEIVE message from client ---
-        read_all(c, iv, 12);
-        read_all(c, (unsigned char*)&ct_len, sizeof(ct_len));
-        ct_len = ntohl(ct_len);
-        read_all(c, ciphertext, ct_len);
-        read_all(c, tag, 16);
-
-        EVP_CIPHER_CTX *d_ctx = EVP_CIPHER_CTX_new();
-        EVP_DecryptInit_ex(d_ctx, EVP_aes_256_gcm(), NULL, key, iv);
-        EVP_DecryptUpdate(d_ctx, plaintext, &outlen, ciphertext, ct_len);
-        EVP_CIPHER_CTX_ctrl(d_ctx, EVP_CTRL_GCM_SET_TAG, 16, tag);
-        EVP_DecryptFinal_ex(d_ctx, plaintext + outlen, &final_len);
-        EVP_CIPHER_CTX_free(d_ctx);
-        plaintext[outlen + final_len] = 0;
-
-        printf("Client: %s\n", plaintext);
-
-        // --- SEND reply to client ---
-        snprintf((char*)plaintext, BUF, "Server reply %d", i + 1);
-        RAND_bytes(iv, 12);
-        EVP_CIPHER_CTX *e_ctx = EVP_CIPHER_CTX_new();
-        EVP_EncryptInit_ex(e_ctx, EVP_aes_256_gcm(), NULL, key, iv);
-        EVP_EncryptUpdate(e_ctx, ciphertext, &outlen, plaintext, strlen((char*)plaintext));
-        EVP_EncryptFinal_ex(e_ctx, ciphertext + outlen, &final_len);
-        EVP_CIPHER_CTX_ctrl(e_ctx, EVP_CTRL_GCM_GET_TAG, 16, tag);
-
-        int nct_len = htonl(outlen + final_len);
-        write_all(c, iv, 12);
-        write_all(c, (unsigned char*)&nct_len, sizeof(nct_len));
-        write_all(c, ciphertext, outlen + final_len);
-        write_all(c, tag, 16);
-        EVP_CIPHER_CTX_free(e_ctx);
-    }
-
-    printf("[+] Server done. Closing.\n");
-    close(c);
-    close(s);
-    return 0;
-}
-
-
-#include <stdio.h>
-#include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <openssl/dh.h>
-#include <openssl/evp.h>
 #include <openssl/sha.h>
-#include <openssl/rand.h>
-#include <openssl/ed25519.h>
+#include <openssl/kdf.h>
+#include <endian.h>
 
-#define PORT 4444
+#define PORT 1112
 #define BUF 2048
-#define ROUNDS 5 // number of message exchanges
 
-int read_all(int fd, unsigned char *buf, int len) {
-    int total = 0;
-    while (total < len) {
-        int r = read(fd, buf + total, len - total);
-        if (r <= 0) return -1;
-        total += r;
+int send_all(int fd, uint8_t *buf,int len)
+    {
+        int total=0;
+        while(total<len)
+        {
+            int s=send(fd,buf+total,len-total,0);
+            if(s<=0)return -1;
+            total+=s;
+        }
+        return total;
+    }
+int recv_all(int fd,   uint8_t *buf,int len)
+{
+    int total=0;
+    while(total<len){
+        int r=recv(fd,buf+total,len-total,0);
+        if(r<=0)return -1;
+        total+=r;
     }
     return total;
 }
 
-int write_all(int fd, unsigned char *buf, int len) {
-    int total = 0;
-    while (total < len) {
-        int r = write(fd, buf + total, len - total);
-        if (r <= 0) return -1;
-        total += r;
+EVP_PKEY* load_key(const char* file,int priv){
+    FILE* f=fopen(file,"r");
+    if(!f)return NULL;
+    EVP_PKEY* k=priv?PEM_read_PrivateKey(f,NULL,NULL,NULL):PEM_read_PUBKEY(f,NULL,NULL,NULL);
+    fclose(f);
+    return k;
+}
+EVP_PKEY* gen_x25519(){
+     EVP_PKEY_CTX *ctx=EVP_PKEY_CTX_new_id(EVP_PKEY_X25519,NULL);
+     EVP_PKEY *pkey=NULL; 
+     EVP_PKEY_keygen_init(ctx); 
+     EVP_PKEY_keygen(ctx,&pkey); 
+     EVP_PKEY_CTX_free(ctx); 
+     return pkey;
+    
+}
+int derive_secret(EVP_PKEY* priv, EVP_PKEY* peer,uint8_t* out){
+    EVP_PKEY_CTX* ctx=EVP_PKEY_CTX_new(priv,NULL); 
+    size_t len=32; 
+    EVP_PKEY_derive_init(ctx); 
+    EVP_PKEY_derive_set_peer(ctx,peer);
+     EVP_PKEY_derive(ctx,out,&len);
+      EVP_PKEY_CTX_free(ctx); 
+      return (int)len;
+}
+int derive_modern_hkdf(const uint8_t *secret,
+                           size_t secret_len,const uint8_t *salt,size_t salt_len,
+                         uint8_t *out,size_t out_len)
+{
+      EVP_KDF *kdf=EVP_KDF_fetch(NULL,"HKDF",NULL);
+      EVP_KDF_CTX *kctx=EVP_KDF_CTX_new(kdf); 
+      OSSL_PARAM params[5],*p=params;
+      *p++=OSSL_PARAM_construct_utf8_string("digest","SHA256",0);
+      *p++=OSSL_PARAM_construct_octet_string("key",(void*)secret,secret_len);
+      *p++=OSSL_PARAM_construct_octet_string("salt",(void*)salt,salt_len);
+      *p++=OSSL_PARAM_construct_octet_string("info","MySecureApp-v1",14);
+      *p=OSSL_PARAM_construct_end();
+       int ret=(EVP_KDF_derive(kctx,out,out_len,params)>0)?0:-1;
+       EVP_KDF_CTX_free(kctx);
+       EVP_KDF_free(kdf);
+       
+       return ret;
+    
+}
+int encrypt_msg_with_seq(uint8_t* key,uint8_t* pt,int plen,
+                            uint8_t* fixed_nonce,uint64_t seq_num,
+                           uint8_t* ct,uint8_t* tag)
+                           {
+       EVP_CIPHER_CTX* ctx=EVP_CIPHER_CTX_new();
+       int len,clen;
+       uint8_t iv[12];
+       memcpy(iv,fixed_nonce,4);
+       // iv  = 12 byte 
+    // iv =  fixed_nonce(4 byte) | sequence_number(8 byte)
+       for(int i=0;i<8;i++)
+             iv[4+i]=(seq_num>>(56-(i*8)))&0xFF;
+
+       EVP_EncryptInit_ex(ctx,EVP_aes_256_gcm(),NULL,key,iv);
+       EVP_EncryptUpdate(ctx,ct,&len,pt,plen);
+       clen=len;
+       EVP_EncryptFinal_ex(ctx,ct+len,&len);
+       clen+=len;
+       EVP_CIPHER_CTX_ctrl(ctx,EVP_CTRL_GCM_GET_TAG,16,tag);
+       EVP_CIPHER_CTX_free(ctx);
+       
+       return clen;
     }
-    return total;
+int decrypt_msg_with_seq(uint8_t* key,uint8_t* ct,int clen,
+                           uint8_t* fixed_nonce,uint64_t seq_num,uint8_t* tag,uint8_t* pt)
+ {
+        EVP_CIPHER_CTX* ctx=EVP_CIPHER_CTX_new();
+        int len,plen;
+        uint8_t iv[12];
+        // iv  = 12 byte 
+        // iv =  fixed_nonce(4 byte) | sequence_number(8 byte)   
+        memcpy(iv,fixed_nonce,4);
+        
+        for(int i=0;i<8;i++)
+            iv[4+i]=(seq_num>>(56-(i*8)))&0xFF;
+        
+        EVP_DecryptInit_ex(ctx,EVP_aes_256_gcm(),NULL,key,iv);
+        EVP_DecryptUpdate(ctx,pt,&len,ct,clen);
+        plen=len;
+        EVP_CIPHER_CTX_ctrl(ctx,EVP_CTRL_GCM_SET_TAG,16,tag);
+        int res=EVP_DecryptFinal_ex(ctx,pt+len,&len);
+        EVP_CIPHER_CTX_free(ctx);
+        
+        return (res>0)?(plen+len):-1;
+    
 }
 
-int main() {
-    int s, c;
-    struct sockaddr_in addr;
-    unsigned char buf[BUF];
+int main(){
+    EVP_PKEY* server_priv=load_key("server_priv.pem",1);
+    EVP_PKEY* client_pub=load_key("client_pub.pem",0);
+    if(!server_priv || !client_pub){printf("Key error\n");return 1;}
 
-    // --- Load client public key ---
-    unsigned char client_pk[32];
-    FILE *f = fopen("client_ed25519_pk.bin","rb");
-    if(!f){ perror("client public key"); return 1; }
-    fread(client_pk,1,32,f); fclose(f);
-
-    // --- Load server private key ---
-    unsigned char server_sk[64];
-    f = fopen("server_ed25519_sk.bin","rb");
-    if(!f){ perror("server private key"); return 1; }
-    fread(server_sk,1,64,f); fclose(f);
-
-    // --- Setup server socket ---
-    s = socket(AF_INET, SOCK_STREAM, 0);
-    int opt = 1;
-    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(PORT);
-    addr.sin_addr.s_addr = INADDR_ANY;
-
-    if(bind(s,(struct sockaddr*)&addr,sizeof(addr))<0){ perror("Bind"); return 1; }
+    int s=socket(AF_INET,SOCK_STREAM,0);
+    struct sockaddr_in a={0};
+    a.sin_family=AF_INET; 
+    a.sin_port=htons(PORT);
+    a.sin_addr.s_addr=INADDR_ANY;
+    bind(s,(void*)&a,sizeof(a)); 
     listen(s,1);
-    printf("[+] Server listening...\n");
+    printf("Listening on %d...\n",PORT);
 
-    c = accept(s,NULL,NULL);
-    printf("[+] Client connected!\n");
+    int c=accept(s,NULL,NULL);
 
-    // --- Diffie-Hellman key exchange ---
-    DH *dh = DH_get_2048_256();
-    DH_generate_key(dh);
-    const BIGNUM *pub = NULL;
-    DH_get0_key(dh,&pub,NULL);
+    uint8_t client_raw[32]; 
+    recv_all(c,client_raw,32);
+    EVP_PKEY* client_eph=EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519,NULL,client_raw,32);
 
-    int pub_len = BN_num_bytes(pub);
-    BN_bn2bin(pub,buf);
-    int nlen = htonl(pub_len);
-    write_all(c,(unsigned char*)&nlen,sizeof(nlen));
-    write_all(c,buf,pub_len);
+    EVP_PKEY* server_eph=gen_x25519(); 
+    uint8_t server_raw[32]; 
+    size_t l=32;
+    EVP_PKEY_get_raw_public_key(server_eph,server_raw,&l);
+    send_all(c,server_raw,32);
 
-    int clen;
-    read_all(c,(unsigned char*)&clen,sizeof(clen));
-    clen = ntohl(clen);
-    read_all(c,buf,clen);
-    BIGNUM *client_pub = BN_bin2bn(buf,clen,NULL);
+    uint8_t transcript[64], sig[64]; 
+    size_t siglen=64;
+    memcpy(transcript,client_raw,32);
+    memcpy(transcript+32,server_raw,32);
 
-    unsigned char secret[256], key[32];
-    int secret_len = DH_compute_key(secret,client_pub,dh);
-    SHA256(secret,secret_len,key);
+    EVP_MD_CTX* m=EVP_MD_CTX_new();
+    EVP_DigestSignInit(m,NULL,NULL,NULL,server_priv);
+    EVP_DigestSign(m,sig,&siglen,transcript,64);
+    send_all(c,sig,(int)siglen);
+    EVP_MD_CTX_free(m);
 
-    DH_free(dh);
-    BN_free(client_pub);
+    uint8_t client_sig[64]; 
+    recv_all(c,client_sig,64);
+    EVP_MD_CTX* v=EVP_MD_CTX_new();
+    EVP_DigestVerifyInit(v,NULL,NULL,NULL,client_pub);
 
-    unsigned char iv[12], tag[16], ciphertext[BUF], plaintext[BUF];
-    int ct_len, outlen, final_len;
-
-    for(int i=0;i<ROUNDS;i++){
-        // --- Receive message ---
-        if(read_all(c,iv,12)<=0) break;
-        if(read_all(c,(unsigned char*)&ct_len,sizeof(ct_len))<=0) break;
-        ct_len = ntohl(ct_len);
-        if(read_all(c,ciphertext,ct_len)<=0) break;
-
-        unsigned char sig[64];
-        if(read_all(c,sig,64)<=0) break;
-        if(read_all(c,tag,16)<=0) break;
-
-        // --- Decrypt ---
-        EVP_CIPHER_CTX *d_ctx = EVP_CIPHER_CTX_new();
-        EVP_DecryptInit_ex(d_ctx,EVP_aes_256_gcm(),NULL,key,iv);
-        EVP_DecryptUpdate(d_ctx,plaintext,&outlen,ciphertext,ct_len);
-        EVP_CIPHER_CTX_ctrl(d_ctx,EVP_CTRL_GCM_SET_TAG,16,tag);
-        if(EVP_DecryptFinal_ex(d_ctx,plaintext+outlen,&final_len)<=0){
-            printf("[-] Decryption failed\n");
-            EVP_CIPHER_CTX_free(d_ctx); break;
-        }
-        EVP_CIPHER_CTX_free(d_ctx);
-        plaintext[outlen+final_len]=0;
-
-        // --- Verify client signature ---
-        if(!ED25519_verify(plaintext,outlen+final_len,sig,client_pk)){
-            printf("[-] Client signature invalid!\n"); break;
-        }
-
-        printf("[Client verified]: %s\n",plaintext);
-
-        // --- Send server reply ---
-        snprintf((char*)plaintext,BUF,"Server reply %d",i+1);
-        RAND_bytes(iv,12);
-        EVP_CIPHER_CTX *e_ctx = EVP_CIPHER_CTX_new();
-        EVP_EncryptInit_ex(e_ctx,EVP_aes_256_gcm(),NULL,key,iv);
-        EVP_EncryptUpdate(e_ctx,ciphertext,&outlen,plaintext,strlen((char*)plaintext));
-        EVP_EncryptFinal_ex(e_ctx,ciphertext+outlen,&final_len);
-        EVP_CIPHER_CTX_ctrl(e_ctx,EVP_CTRL_GCM_GET_TAG,16,tag);
-
-        // --- Sign plaintext ---
-        unsigned char server_sig[64];
-        ED25519_sign(server_sig,plaintext,strlen((char*)plaintext),server_sk);
-
-        int nct_len = htonl(outlen+final_len);
-        write_all(c,iv,12);
-        write_all(c,(unsigned char*)&nct_len,sizeof(nct_len));
-        write_all(c,ciphertext,outlen+final_len);
-        write_all(c,server_sig,64);
-        write_all(c,tag,16);
-        EVP_CIPHER_CTX_free(e_ctx);
+    if(EVP_DigestVerify(v,client_sig,64,transcript,64)<=0)
+    {   printf("Auth failed\n");
+        return 1;
     }
+    EVP_MD_CTX_free(v);
 
-    printf("[+] Server done. Closing.\n");
-    close(c);
-    close(s);
+    uint8_t secret[32], key[32], fixed_nonce[4],  key_material[36];
+
+    derive_secret(server_eph,client_eph,secret);
+    derive_modern_hkdf(secret,32, transcript,64, key_material,36);
+    memcpy(key, key_material,32);
+    memcpy(fixed_nonce, key_material+32,4);
+
+    printf("Secure channel established.\n");
+
+    uint64_t send_seq=0, recv_seq=0;
+
+        uint8_t tag[16], ct[BUF], pt[BUF];
+        int n, clen;
+
+        // RECEIVE
+        //     +----------------+--------------------+----------------+
+        //     | Sequence (8B)  | Ciphertext (n B)   | Tag (16 B)     |
+        //     +----------------+--------------------+----------------+
+        //     byte 0           byte 8               ... byte total_len+15
+
+uint8_t seq_buf[8];
+uint32_t net_len;
+
+/* receive sequence */
+if(recv_all(c, seq_buf, 8)<=0) return 0;
+
+uint64_t rseq = 0;
+for(int i=0;i<8;i++)
+    rseq = (rseq<<8) | seq_buf[i];
+
+/* receive ciphertext length */
+if(recv_all(c,(uint8_t*)&net_len,4)<=0) return 0;
+
+clen = ntohl(net_len);
+if(clen<=0 || clen>BUF) return 0;
+
+/* receive ciphertext */
+if(recv_all(c,ct,clen)<=0) return 0;
+
+/* receive tag */
+if(recv_all(c,tag,16)<=0) return 0;
+
+/* decrypt */
+int plen = decrypt_msg_with_seq(
+                key,ct,clen,
+                fixed_nonce,rseq,
+                tag,pt);
+
+if(plen < 0){
+    printf("Integrity fail!\n");
     return 0;
 }
+
+pt[plen] = 0;
+printf("Client: %s\n", pt);
+close(c);
+close(s);
+return 0;
+}      
+      
