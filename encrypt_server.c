@@ -7,6 +7,9 @@
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 #include <openssl/kdf.h> 
+#include <netpacket/packet.h>
+#include <net/ethernet.h>
+#include <net/if.h>
 
 #define PORT 1112
 #define PORT_CLIENT 1113
@@ -97,10 +100,14 @@ int main(){
 
     int s_decrypt = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a = {0};
-    a.sin_family = AF_INET; a.sin_port = htons(PORT);
-    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
-    connect(s_decrypt, (void*)&a, sizeof(a));
-
+    a.sin_family = AF_INET; 
+    a.sin_port = htons(PORT);
+    inet_pton(AF_INET, "10.0.2.2", &a.sin_addr); // FIX: Target Decryptor IP
+    
+    if (connect(s_decrypt, (void*)&a, sizeof(a)) < 0) {
+        perror("Handshake connection failed");
+        return 1;
+    }
     // --- Handshake ---
     EVP_PKEY* client_eph = gen_x25519();
     unsigned char client_raw[32]; size_t l=32;
@@ -140,7 +147,7 @@ int main(){
 
 
     printf("[Proxy] Secure channel to Server established.\n");
-
+/*
     // 2. PREPARE PROXY: Listen for Program 1
     int s_listen = socket(AF_INET, SOCK_STREAM, 0);
     int opt = 1;
@@ -151,10 +158,68 @@ int main(){
     proxy_addr.sin_addr.s_addr = INADDR_ANY;
     bind(s_listen, (void*)&proxy_addr, sizeof(proxy_addr)); 
     listen(s_listen, 5);
+*/
+// ... after handshake and secure channel init ...
 
+    int s_raw = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+    struct sockaddr_ll sll = {0};
+    sll.sll_family = AF_PACKET;
+    sll.sll_ifindex = if_nametoindex("veth_e"); 
+
+    if (bind(s_raw, (struct sockaddr *)&sll, sizeof(sll)) < 0) {
+        perror("Raw bind failed");
+        return 1;
+    }
+
+    // 4. Variables for the Tunnel
+    uint8_t frame[BUF], ct[BUF + 16], tag[16];
+    // ... inside main ...
     uint64_t send_seq = 0;
-    unsigned char pt[BUF], ct[BUF], tag[16];
 
+    printf("[Proxy] Sniffing veth_e for traffic to tunnel...\n");
+
+    while(1) {
+        int frame_len = recv(s_raw, frame, BUF, 0);
+        if (frame_len <= 0) continue;
+
+        // 1. Must be IPv4 (EtherType 0x0800)
+        if (frame[12] == 0x08 && frame[13] == 0x00) { 
+
+            // 2. Protocol Check: UDP is 17 (0x11)
+            // If you want BOTH TCP and UDP, use: if (frame[23] == 6 || frame[23] == 17)
+            if (frame[23] == 17) {
+                
+                // 3. Get Ports (UDP and TCP headers both put ports at the same offsets)
+                uint16_t src_port = (frame[34] << 8) | frame[35];
+                uint16_t dst_port = (frame[36] << 8) | frame[37];
+
+                // 4. Ignore our own tunnel control traffic
+                if (src_port == PORT || dst_port == PORT) continue;
+
+                // 5. Encrypt and Forward
+                int clen = encrypt_msg_with_seq(key, frame, frame_len, fixed_nonce, send_seq, ct, tag);
+
+                uint32_t net_len = htonl(clen);
+                unsigned char seq_buf[8];
+                for (int i=0; i<8; i++) 
+                    seq_buf[i] = (send_seq >> (56 - i*8)) & 0xFF;
+
+                // Send the Encrypted Bundle to the Decryptor
+                if (send_all(s_decrypt, seq_buf, 8) < 0) break;
+                if (send_all(s_decrypt, (uint8_t*)&net_len, 4) < 0) break;
+                if (send_all(s_decrypt, ct, clen) < 0) break;
+                if (send_all(s_decrypt, tag, 16) < 0) break;
+
+                printf("[Proxy] Tunneled UDP Packet #%lu (Size: %d bytes)\n", send_seq, frame_len);
+                send_seq++;
+            }
+        }
+    }
+    printf("[Proxy] Tunneling stopped.\n");    close(s_raw);
+    close(s_decrypt);
+    return 0;
+}
+    /*
     // 3. MAIN LOOP: Stay alive to bridge messages
     
         printf("\n[Proxy] Waiting for plaintext from Program 1...\n");
@@ -190,3 +255,4 @@ int main(){
     close(s_decrypt);
     return 0;
 }
+*/
