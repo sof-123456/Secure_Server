@@ -1,3 +1,5 @@
+#!/bin/bash
+
 sudo ip netns add sender_ns
 sudo ip netns add encrypt_ns
 sudo ip netns add decrypt_ns
@@ -49,3 +51,12 @@ sudo ip netns exec encrypt_ns ip route add 10.0.3.0/24 via 10.0.2.2
 sudo ip netns exec decrypt_ns ip route add 10.0.1.0/24 via 10.0.2.1
 
 sudo ip netns exec receiver_ns ip route add default via 10.0.3.1
+
+
+
+# sudo ip netns exec decrypt_ns ./decrypt_server  
+# sudo ip netns exec encrypt_ns ./encrypt_server
+# sudo ip netns exec receiver_ns nc -u -l -p 1114
+# sudo ip netns exec sender_ns nc -u 10.0.3.2 1114
+#sudo ip netns exec encrypt_ns ip link show  
+#sudo ip netns exec  decrypt_ns   tcpdump -i veth_d -nn

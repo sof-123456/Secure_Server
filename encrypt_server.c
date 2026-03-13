@@ -12,53 +12,57 @@
 #include <net/if.h>
 
 #define PORT 1112
-#define PORT_CLIENT 1113
 #define BUF 2048
 
-int send_all(int fd,  uint8_t  * buf, int len){
-    int total=0; 
-    while(total<len){
-        int s=send(fd,buf+total,len-total,0);
-        if(s<=0) return -1; 
-        total+=s;
-    } return total;
+// --- Helper Functions ---
+
+int send_all(int fd, uint8_t *buf, int len) {
+    int total = 0; 
+    while (total < len) {
+        int s = send(fd, buf + total, len - total, 0);
+        if (s <= 0) return -1; 
+        total += s;
+    } 
+    return total;
 }
 
-int recv_all(int fd,   uint8_t * buf, int len){
-    int total=0; while(total<len){
-        int r=recv(fd,buf+total,len-total,0);
-        if(r<=0) 
-           return -1;
-        total+=r;
+int recv_all(int fd, uint8_t *buf, int len) {
+    int total = 0; 
+    while (total < len) {
+        int r = recv(fd, buf + total, len - total, 0);
+        if (r <= 0) return -1;
+        total += r;
     }
-     return total;
+    return total;
 }
 
-EVP_PKEY* load_key(const char* file,int priv){
-    FILE* f=fopen(file,"r"); if(!f) return NULL;
-    EVP_PKEY* k= priv ? PEM_read_PrivateKey(f,NULL,NULL,NULL) : PEM_read_PUBKEY(f,NULL,NULL,NULL);
-    fclose(f); return k;
+EVP_PKEY* load_key(const char* file, int priv) {
+    FILE* f = fopen(file, "r"); 
+    if (!f) return NULL;
+    EVP_PKEY* k = priv ? PEM_read_PrivateKey(f, NULL, NULL, NULL) : PEM_read_PUBKEY(f, NULL, NULL, NULL);
+    fclose(f); 
+    return k;
 }
 
-EVP_PKEY* gen_x25519(){
-    EVP_PKEY_CTX *ctx=EVP_PKEY_CTX_new_id(EVP_PKEY_X25519,NULL);
-    EVP_PKEY *pkey=NULL; EVP_PKEY_keygen_init(ctx); EVP_PKEY_keygen(ctx,&pkey);
+EVP_PKEY* gen_x25519() {
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, NULL);
+    EVP_PKEY *pkey = NULL; 
+    EVP_PKEY_keygen_init(ctx); 
+    EVP_PKEY_keygen(ctx, &pkey);
     EVP_PKEY_CTX_free(ctx); 
     return pkey;
 }
 
-int derive_secret(EVP_PKEY* priv, EVP_PKEY* peer, uint8_t * out){
-    EVP_PKEY_CTX* ctx=EVP_PKEY_CTX_new(priv,NULL); 
-    size_t len=32;
+int derive_secret(EVP_PKEY* priv, EVP_PKEY* peer, uint8_t *out) {
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(priv, NULL); 
+    size_t len = 32;
     EVP_PKEY_derive_init(ctx);
-    EVP_PKEY_derive_set_peer(ctx,peer);
-    EVP_PKEY_derive(ctx,out,&len);
+    EVP_PKEY_derive_set_peer(ctx, peer);
+    EVP_PKEY_derive(ctx, out, &len);
     EVP_PKEY_CTX_free(ctx);
-    
     return (int)len;
 }
-//RNG  --Entropy check 
-// --- HKDF & AES-GCM Logic (Must Match Server) ---
+
 int derive_modern_hkdf(const unsigned char *secret, size_t secret_len, 
                        const unsigned char *salt, size_t salt_len,
                        unsigned char *out, size_t out_len) {
@@ -76,11 +80,12 @@ int derive_modern_hkdf(const unsigned char *secret, size_t secret_len,
     return ret;
 }
 
-int encrypt_msg_with_seq(uint8_t  * key, uint8_t * pt, int plen,
-                        uint8_t*  fixed_nonce, uint64_t seq_num, 
-                        uint8_t * ct, uint8_t * tag) {
+int encrypt_msg_with_seq(uint8_t *key, uint8_t *pt, int plen,
+                        uint8_t *fixed_nonce, uint64_t seq_num, 
+                        uint8_t *ct, uint8_t *tag) {
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    int len, clen; unsigned char iv[12];
+    int len, clen; 
+    unsigned char iv[12];
     memcpy(iv, fixed_nonce, 4);
     for (int i = 0; i < 8; i++)   
          iv[4 + i] = (seq_num >> (56 - (i * 8))) & 0xFF;
@@ -89,28 +94,33 @@ int encrypt_msg_with_seq(uint8_t  * key, uint8_t * pt, int plen,
     EVP_EncryptUpdate(ctx, ct, &len, pt, plen); clen = len;
     EVP_EncryptFinal_ex(ctx, ct + len, &len); clen += len;
     EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag);
-    EVP_CIPHER_CTX_free(ctx); return clen;
+    EVP_CIPHER_CTX_free(ctx); 
+    return clen;
 }
 
-
-int main(){
+int main() {
+    // 1. Initial Key Loading
     EVP_PKEY* client_priv = load_key("client_priv.pem", 1);
     EVP_PKEY* server_pub = load_key("server_pub.pem", 0);
-    if (!client_priv || !server_pub) { printf("Key load failed\n"); return 1; }
-
+    if (!client_priv || !server_pub) {
+        fprintf(stderr, "Error loading PEM keys.\n");
+        return 1;
+    }
+    
     int s_decrypt = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET; 
     a.sin_port = htons(PORT);
-    inet_pton(AF_INET, "10.0.2.2", &a.sin_addr); // FIX: Target Decryptor IP
+    inet_pton(AF_INET, "10.0.2.2", &a.sin_addr); 
     
-    if (connect(s_decrypt, (void*)&a, sizeof(a)) < 0) {
-        perror("Handshake connection failed");
+    if (connect(s_decrypt, (struct sockaddr*)&a, sizeof(a)) < 0) {
+        perror("Connect to Decryptor failed");
         return 1;
     }
+
     // --- Handshake ---
     EVP_PKEY* client_eph = gen_x25519();
-    unsigned char client_raw[32]; size_t l=32;
+    unsigned char client_raw[32]; size_t l = 32;
     EVP_PKEY_get_raw_public_key(client_eph, client_raw, &l);
     send_all(s_decrypt, client_raw, 32);
 
@@ -120,139 +130,82 @@ int main(){
 
     unsigned char transcript[64];
     memcpy(transcript, client_raw, 32); 
-    memcpy(transcript+32, server_raw, 32);
+    memcpy(transcript + 32, server_raw, 32);
 
     recv_all(s_decrypt, server_sig, 64);
 
     EVP_MD_CTX* v = EVP_MD_CTX_new();
     EVP_DigestVerifyInit(v, NULL, NULL, NULL, server_pub);
-    if(EVP_DigestVerify(v, server_sig, 64, transcript, 64) <= 0) { printf("Server Auth Fail\n"); return 1; }
+    if (EVP_DigestVerify(v, server_sig, 64, transcript, 64) <= 0) {
+        printf("Server Auth Fail\n"); 
+        return 1; 
+    }
     EVP_MD_CTX_free(v);
 
     unsigned char client_sig[64];
-    size_t siglen=64;
+    size_t siglen = 64;
     EVP_MD_CTX* m = EVP_MD_CTX_new();
     EVP_DigestSignInit(m, NULL, NULL, NULL, client_priv);
     EVP_DigestSign(m, client_sig, &siglen, transcript, 64);
     send_all(s_decrypt, client_sig, 64);
     EVP_MD_CTX_free(m);
 
-    // --- Secure Channel Init ---
-    unsigned char secret[32], key[32], fixed_nonce[4], key_material[36];
+    // --- Secure Channel Key Derivation ---
+    uint8_t key[32], fixed_nonce[4]; 
+    unsigned char secret[32], key_material[36];
 
     derive_secret(client_eph, server_eph, secret);
-    derive_modern_hkdf(secret, 32, transcript, 64, key_material, 36);   // 36 byte  
+    if (derive_modern_hkdf(secret, 32, transcript, 64, key_material, 36) < 0) {
+        printf("Key derivation failed\n");
+        return 1;
+    }
     memcpy(key, key_material, 32); 
     memcpy(fixed_nonce, key_material + 32, 4);
 
+    printf("[Proxy] Handshake successful. Tunneling starting...\n");
 
-    printf("[Proxy] Secure channel to Server established.\n");
-/*
-    // 2. PREPARE PROXY: Listen for Program 1
-    int s_listen = socket(AF_INET, SOCK_STREAM, 0);
-    int opt = 1;
-    setsockopt(s_listen, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    struct sockaddr_in proxy_addr = {0};
-    proxy_addr.sin_family = AF_INET; 
-    proxy_addr.sin_port = htons(PORT_CLIENT); // PORT 1113
-    proxy_addr.sin_addr.s_addr = INADDR_ANY;
-    bind(s_listen, (void*)&proxy_addr, sizeof(proxy_addr)); 
-    listen(s_listen, 5);
-*/
-// ... after handshake and secure channel init ...
-
+    // 2. Setup Raw Sniffing
     int s_raw = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     struct sockaddr_ll sll = {0};
     sll.sll_family = AF_PACKET;
     sll.sll_ifindex = if_nametoindex("veth_e"); 
-
     if (bind(s_raw, (struct sockaddr *)&sll, sizeof(sll)) < 0) {
         perror("Raw bind failed");
         return 1;
     }
 
-    // 4. Variables for the Tunnel
     uint8_t frame[BUF], ct[BUF + 16], tag[16];
-    // ... inside main ...
     uint64_t send_seq = 0;
 
-    printf("[Proxy] Sniffing veth_e for traffic to tunnel...\n");
-
-    while(1) {
+    while (1) {
         int frame_len = recv(s_raw, frame, BUF, 0);
-        if (frame_len <= 0) continue;
+        if (frame_len <= 14) continue; 
 
-        // 1. Must be IPv4 (EtherType 0x0800)
-        if (frame[12] == 0x08 && frame[13] == 0x00) { 
+        // Filter: IPv4 (0x0800) and UDP (17)
+        if (frame[12] == 0x08 && frame[13] == 0x00 && frame[23] == 17) {
+            
+            uint16_t src_port = (frame[34] << 8) | frame[35];
+            uint16_t dst_port = (frame[36] << 8) | frame[37];
 
-            // 2. Protocol Check: UDP is 17 (0x11)
-            // If you want BOTH TCP and UDP, use: if (frame[23] == 6 || frame[23] == 17)
-            if (frame[23] == 17) {
-                
-                // 3. Get Ports (UDP and TCP headers both put ports at the same offsets)
-                uint16_t src_port = (frame[34] << 8) | frame[35];
-                uint16_t dst_port = (frame[36] << 8) | frame[37];
+            // Anti-Loop: Ignore tunnel control traffic
+            if (src_port == PORT || dst_port == PORT) continue;
 
-                // 4. Ignore our own tunnel control traffic
-                if (src_port == PORT || dst_port == PORT) continue;
+            int clen = encrypt_msg_with_seq(key, frame, frame_len, fixed_nonce, send_seq, ct, tag);
 
-                // 5. Encrypt and Forward
-                int clen = encrypt_msg_with_seq(key, frame, frame_len, fixed_nonce, send_seq, ct, tag);
+            uint32_t net_len = htonl(clen);
+            uint8_t seq_be[8];
+            for (int i = 0; i < 8; i++) seq_be[i] = (send_seq >> (56 - i * 8)) & 0xFF;
 
-                uint32_t net_len = htonl(clen);
-                unsigned char seq_buf[8];
-                for (int i=0; i<8; i++) 
-                    seq_buf[i] = (send_seq >> (56 - i*8)) & 0xFF;
+            if (send_all(s_decrypt, seq_be, 8) < 0) break;
+            if (send_all(s_decrypt, (uint8_t*)&net_len, 4) < 0) break;
+            if (send_all(s_decrypt, ct, clen) < 0) break;
+            if (send_all(s_decrypt, tag, 16) < 0) break;
 
-                // Send the Encrypted Bundle to the Decryptor
-                if (send_all(s_decrypt, seq_buf, 8) < 0) break;
-                if (send_all(s_decrypt, (uint8_t*)&net_len, 4) < 0) break;
-                if (send_all(s_decrypt, ct, clen) < 0) break;
-                if (send_all(s_decrypt, tag, 16) < 0) break;
-
-                printf("[Proxy] Tunneled UDP Packet #%lu (Size: %d bytes)\n", send_seq, frame_len);
-                send_seq++;
-            }
+            printf("[Proxy] Tunneled Packet #%lu (%d bytes) %d\n", send_seq++, frame_len,ct );
         }
     }
-    printf("[Proxy] Tunneling stopped.\n");    close(s_raw);
+
+    close(s_raw);
     close(s_decrypt);
     return 0;
 }
-    /*
-    // 3. MAIN LOOP: Stay alive to bridge messages
-    
-        printf("\n[Proxy] Waiting for plaintext from Program 1...\n");
-
-        int c_client = accept(s_listen, NULL, NULL);
-        if (c_client < 0)  return 0;
-
-        // Read the plaintext
-        int received = recv(c_client, pt, BUF, 0); 
-        if (received > 0) {
-            printf("[Proxy] Received %d bytes. Encrypting...\n", received);
-            
-            // Encrypt
-            int clen = encrypt_msg_with_seq(key, pt, received, fixed_nonce, send_seq, ct, tag);
-
-            // Send structured packet to Program 3
-            uint32_t net_len = htonl(clen);
-            uint64_t seq_out = send_seq++;
-            unsigned char seq_buf[8];
-            for (int i=0; i<8; i++)
-                seq_buf[i] = (seq_out >> (56 - i*8)) & 0xFF;
-
-            send_all(s_decrypt, seq_buf, 8);
-            send_all(s_decrypt, (uint8_t*)&net_len, 4);
-            send_all(s_decrypt, ct, clen);
-            send_all(s_decrypt, tag, 16);
-
-            printf("[Proxy] Forwarded encrypted data to Decrypt Server.\n");
-        }
-        close(c_client); // Close connection to Program 1, but KEEP connection to Program 3 open
-
-    // This part is only reached if the loop breaks
-    close(s_decrypt);
-    return 0;
-}
-*/

@@ -15,7 +15,6 @@
 #define PORT 1112
 #define BUF 2048
 
-// Helper to ensure all bytes are sent
 int send_all(int fd, uint8_t *buf, int len) {
     int total = 0;
     while (total < len) {
@@ -26,7 +25,6 @@ int send_all(int fd, uint8_t *buf, int len) {
     return total;
 }
 
-// Helper to ensure all bytes are received
 int recv_all(int fd, uint8_t *buf, int len) {
     int total = 0;
     while (total < len) {
@@ -116,6 +114,7 @@ int main() {
 
     int c = accept(s, NULL, NULL);
     printf("Proxy connected. Starting Handshake...\n");
+
     // --- Key Exchange ---
     uint8_t client_raw[32];
     recv_all(c, client_raw, 32);
@@ -171,7 +170,8 @@ int main() {
         // 1. Get Sequence
         if (recv_all(c, seq_buf, 8) <= 0) break;
         uint64_t rseq = 0;
-        for (int i = 0; i < 8; i++) rseq = (rseq << 8) | seq_buf[i];
+        for (int i = 0; i < 8; i++)
+            rseq = (rseq << 8) | seq_buf[i];
 
         // 2. Get Length
         if (recv_all(c, (uint8_t*)&net_len, 4) <= 0) break;
@@ -193,8 +193,19 @@ int main() {
         if ( sendto(s_inject, pt, plen, 0, (struct sockaddr*)&sll, sizeof(sll)) < 0) {
             perror("Injection failed");
         } else {
-            printf("[Decryptor] Injected Frame #%lu (%d bytes)\n", rseq, plen);
+            printf("[Decryptor] Injected Frame #%lu (%d bytes) %s \n", rseq, plen, pt);
         }
+        // Calculate where the UDP payload begins
+    int header_offset = 14 + 20 + 8; 
+    
+    if (plen > header_offset) {
+        // pt + 42 moves the pointer past the headers
+        // We use "%.*s" to print exactly (plen - 42) characters safely
+        printf("[Decryptor] Packet #%lu | Payload: %.*s\n", 
+                rseq, (plen - header_offset), pt + header_offset);
+    } else {
+        printf("[Decryptor] Packet #%lu | (No payload or non-UDP frame)\n", rseq);
+    }
     }
 
     close(c); 
