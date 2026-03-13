@@ -25,17 +25,17 @@ int main() {
     printf("UDP Receiver waiting on port %d...\n", PORT);
 
     uint8_t buffer[BUF];
-    while(1) {
-        struct sockaddr_in client_addr;
-        socklen_t addr_len = sizeof(client_addr);
-        
-        int received = recvfrom(s, buffer, BUF - 1, 0, (struct sockaddr*)&client_addr, &addr_len);
-        
-        if (received > 0) {
-            buffer[received] = '\0'; // Null-terminate the string
-            printf("From Client: %s\n", buffer);
-        }
-    }
+
+     struct sockaddr_in client_addr;
+     socklen_t addr_len = sizeof(client_addr);
+     
+     int received = recvfrom(s, buffer, BUF - 1, 0, (struct sockaddr*)&client_addr, &addr_len);
+     
+     if (received > 0) {
+         buffer[received] = '\0'; // Null-terminate the string
+         printf("From Client: %s\n", buffer);
+     }
+    
     close(s);
     return 0;
 }

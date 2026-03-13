@@ -14,7 +14,6 @@
 #define PORT 1112
 #define BUF 2048
 
-// --- Helper Functions ---
 
 int send_all(int fd, uint8_t *buf, int len) {
     int total = 0; 
@@ -98,8 +97,32 @@ int encrypt_msg_with_seq(uint8_t *key, uint8_t *pt, int plen,
     return clen;
 }
 
+int verify_signature(EVP_PKEY* pub_key, unsigned char* signature, size_t sig_len, unsigned char* data, size_t data_len) {
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (EVP_DigestVerifyInit(ctx, NULL, NULL, NULL, pub_key) <= 0) {
+        EVP_MD_CTX_free(ctx);
+        return -1;
+    }
+    
+    int result = EVP_DigestVerify(ctx, signature, sig_len, data, data_len);
+    EVP_MD_CTX_free(ctx);
+    return result; 
+}
+
+
+int create_signature(EVP_PKEY* priv_key, unsigned char* sig_out, size_t* sig_len, unsigned char* data, size_t data_len) {
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (EVP_DigestSignInit(ctx, NULL, NULL, NULL, priv_key) <= 0) {
+        EVP_MD_CTX_free(ctx);
+        return -1;
+    }
+    
+    int result = EVP_DigestSign(ctx, sig_out, sig_len, data, data_len);
+    EVP_MD_CTX_free(ctx);
+    return result; 
+}
+
 int main() {
-    // 1. Initial Key Loading
     EVP_PKEY* client_priv = load_key("client_priv.pem", 1);
     EVP_PKEY* server_pub = load_key("server_pub.pem", 0);
     if (!client_priv || !server_pub) {
@@ -134,22 +157,20 @@ int main() {
 
     recv_all(s_decrypt, server_sig, 64);
 
-    EVP_MD_CTX* v = EVP_MD_CTX_new();
-    EVP_DigestVerifyInit(v, NULL, NULL, NULL, server_pub);
-    if (EVP_DigestVerify(v, server_sig, 64, transcript, 64) <= 0) {
-        printf("Server Auth Fail\n"); 
-        return 1; 
-    }
-    EVP_MD_CTX_free(v);
-
     unsigned char client_sig[64];
-    size_t siglen = 64;
-    EVP_MD_CTX* m = EVP_MD_CTX_new();
-    EVP_DigestSignInit(m, NULL, NULL, NULL, client_priv);
-    EVP_DigestSign(m, client_sig, &siglen, transcript, 64);
-    send_all(s_decrypt, client_sig, 64);
-    EVP_MD_CTX_free(m);
 
+     if (verify_signature(server_pub, server_sig, 64, transcript, 64) <= 0) {
+         printf("Server Auth Fail\n"); 
+         return 1; 
+     }
+     
+     // 2. Sign Client Transcript
+     size_t siglen = 64;
+     if (create_signature(client_priv, client_sig, &siglen, transcript, 64) <= 0) {
+         printf("Signing Fail\n");
+         return 1;
+     }
+    send_all(s_decrypt, client_sig, 64);
     // --- Secure Channel Key Derivation ---
     uint8_t key[32], fixed_nonce[4]; 
     unsigned char secret[32], key_material[36];
@@ -179,6 +200,7 @@ int main() {
 
     while (1) {
         int frame_len = recv(s_raw, frame, BUF, 0);
+        
         if (frame_len <= 14) continue; 
 
         // Filter: IPv4 (0x0800) and UDP (17)
@@ -194,7 +216,8 @@ int main() {
 
             uint32_t net_len = htonl(clen);
             uint8_t seq_be[8];
-            for (int i = 0; i < 8; i++) seq_be[i] = (send_seq >> (56 - i * 8)) & 0xFF;
+            for (int i = 0; i < 8; i++) 
+                 seq_be[i] = (send_seq >> (56 - i * 8)) & 0xFF;
 
             if (send_all(s_decrypt, seq_be, 8) < 0) break;
             if (send_all(s_decrypt, (uint8_t*)&net_len, 4) < 0) break;

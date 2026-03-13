@@ -23,8 +23,8 @@ int main() {
     // Just send the message. Don't add a manual length header.
     // The tunnel sniffs the WHOLE packet (IP+UDP+Data).
     sendto(s, msg, strlen(msg), 0, (struct sockaddr*)&a, sizeof(a));
-
-    printf("Sent: %s\n", msg);
+     
+    printf("Sent: %s len %d\n", msg , strlen(msg));
     fflush(stdout);
     close(s);
     return 0;

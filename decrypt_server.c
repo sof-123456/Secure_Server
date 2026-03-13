@@ -94,6 +94,32 @@ int decrypt_msg_with_seq(uint8_t* key, uint8_t* ct, int clen, uint8_t* fixed_non
     return (res > 0) ? (plen + len) : -1;
 }
 
+
+int verify_signature(EVP_PKEY* pub_key, unsigned char* signature, size_t sig_len, unsigned char* data, size_t data_len) {
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (EVP_DigestVerifyInit(ctx, NULL, NULL, NULL, pub_key) <= 0) {
+        EVP_MD_CTX_free(ctx);
+        return -1;
+    }
+    
+    int result = EVP_DigestVerify(ctx, signature, sig_len, data, data_len);
+    EVP_MD_CTX_free(ctx);
+    return result; 
+}
+
+
+int create_signature(EVP_PKEY* priv_key, unsigned char* sig_out, size_t* sig_len, unsigned char* data, size_t data_len) {
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (EVP_DigestSignInit(ctx, NULL, NULL, NULL, priv_key) <= 0) {
+        EVP_MD_CTX_free(ctx);
+        return -1;
+    }
+    
+    int result = EVP_DigestSign(ctx, sig_out, sig_len, data, data_len);
+    EVP_MD_CTX_free(ctx);
+    return result; 
+}
+
 int main() {
     EVP_PKEY* server_priv = load_key("server_priv.pem", 1);
     EVP_PKEY* client_pub = load_key("client_pub.pem", 0);
@@ -119,8 +145,8 @@ int main() {
     uint8_t client_raw[32];
     recv_all(c, client_raw, 32);
     printf("1. Received Client Eph Key\n");
-    EVP_PKEY* client_eph = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, client_raw, 32);
 
+    EVP_PKEY* client_eph = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, client_raw, 32);
     EVP_PKEY* server_eph = gen_x25519();
     uint8_t server_raw[32];
     size_t l = 32;
@@ -132,22 +158,25 @@ int main() {
     memcpy(transcript + 32, server_raw, 32);
 
     // --- Authentication ---
-    uint8_t sig[64]; size_t siglen = 64;
-    EVP_MD_CTX *mctx = EVP_MD_CTX_new();
-    EVP_DigestSignInit(mctx, NULL, NULL, NULL, server_priv);
-    EVP_DigestSign(mctx, sig, &siglen, transcript, 64);
-    send_all(c, sig, 64);
-    EVP_MD_CTX_free(mctx);
-
+    uint8_t sig[64]; 
     uint8_t client_sig[64];
-    recv_all(c, client_sig, 64);
-    EVP_MD_CTX* vctx = EVP_MD_CTX_new();
-    EVP_DigestVerifyInit(vctx, NULL, NULL, NULL, client_pub);
-    if (EVP_DigestVerify(vctx, client_sig, 64, transcript, 64) <= 0) {
-        printf("Client Auth Fail\n"); return 1;
-    }
-    EVP_MD_CTX_free(vctx);
 
+        size_t siglen = 64;
+        if (create_signature(server_priv, sig, &siglen, transcript, 64) <= 0) {
+            fprintf(stderr, "Server signing failed\n");
+            return 1;
+        }
+        send_all(c, sig, 64);
+
+        if (recv_all(c, client_sig, 64) < 0) {
+            fprintf(stderr, "Failed to receive client signature\n");
+            return 1;
+        }
+
+        if (verify_signature(client_pub, client_sig, 64, transcript, 64) <= 0) {
+            printf("Client Auth Fail\n");
+            return 1;
+        }
     // --- Derivation ---
     uint8_t secret[32], key[32], fixed_nonce[4], key_material[36];
     derive_secret(server_eph, client_eph, secret);
@@ -199,8 +228,7 @@ int main() {
     int header_offset = 14 + 20 + 8; 
     
     if (plen > header_offset) {
-        // pt + 42 moves the pointer past the headers
-        // We use "%.*s" to print exactly (plen - 42) characters safely
+    
         printf("[Decryptor] Packet #%lu | Payload: %.*s\n", 
                 rseq, (plen - header_offset), pt + header_offset);
     } else {

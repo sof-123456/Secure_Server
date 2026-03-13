@@ -1,0 +1,14 @@
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+[user]
+	name = Sofya Ohanyan
+	email = sofya@example.com
+[remote "origin"]
+	url = git@github.com:sof-123456/Secure_Server.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "L2"]
+	remote = origin
+	merge = refs/heads/L2

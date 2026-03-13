@@ -56,7 +56,10 @@ sudo ip netns exec receiver_ns ip route add default via 10.0.3.1
 
 # sudo ip netns exec decrypt_ns ./decrypt_server  
 # sudo ip netns exec encrypt_ns ./encrypt_server
-# sudo ip netns exec receiver_ns nc -u -l -p 1114
-# sudo ip netns exec sender_ns nc -u 10.0.3.2 1114
+# sudo ip netns exec receiver_ns ./receiver
+# sudo ip netns exec sender_ns  ./sender
+
+
 #sudo ip netns exec encrypt_ns ip link show  
 #sudo ip netns exec  decrypt_ns   tcpdump -i veth_d -nn
+#sudo ip netns exec  encrypt_ns   tcpdump -i veth_e2 -nn
